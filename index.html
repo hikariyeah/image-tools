@@ -96,4 +96,100 @@
                     <span class="file-status status-wait" id="status-${index}">等待中...</span>
                 `;
                 fileListContainer.appendChild(item);
-                return
+                return { file, statusEl: item.querySelector(`#status-${index}`) };
+            });
+
+            // 一个接一个地处理图片（防止多张图同时转码导致浏览器卡死）
+            for (let i = 0; i < fileItems.length; i++) {
+                const { file, statusEl } = fileItems[i];
+                statusEl.innerText = '正在解析 HEIC...';
+                statusEl.className = 'file-status status-ing';
+
+                try {
+                    // 1. HEIC 转成 Blob
+                    const convertedBlob = await heic2any({
+                        blob: file,
+                        toType: "image/jpeg"
+                    });
+
+                    // 2. 载入图片对象获取宽高
+                    const img = new Image();
+                    const url = URL.createObjectURL(convertedBlob);
+                    
+                    await new Promise((resolve) => {
+                        img.onload = () => {
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            ctx.drawImage(img, 0, 0);
+                            URL.revokeObjectURL(url);
+                            resolve();
+                        };
+                        img.src = url;
+                    });
+
+                    // 3. 动态画质压缩循环，死守 800KB 限制
+                    statusEl.innerText = '正在智能压缩...';
+                    let quality = 0.95;
+                    let finalBlob = null;
+
+                    do {
+                        // 这次我们直接导出 Blob 方便后续打 zip 包
+                        finalBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
+                        quality -= 0.05;
+                    } while (finalBlob.size > MAX_SIZE && quality > 0.1);
+
+                    // 4. 处理完成，保存数据
+                    const newName = file.name.replace(/\.[^/.]+$/, "") + "_compressed.png";
+                    processedImages.push({ name: newName, blob: finalBlob });
+
+                    const finalSizeKB = (finalBlob.size / 1024).toFixed(1);
+                    statusEl.innerText = `完成 (${finalSizeKB} KB)`;
+                    statusEl.className = 'file-status status-done';
+
+                } catch (error) {
+                    console.error(error);
+                    statusEl.innerText = '转换失败';
+                    statusEl.className = 'file-status status-error';
+                }
+
+                summaryText.innerText = `进度：已处理 ${i + 1} / ${files.length} 张图片`;
+            }
+
+            // 全部处理完成后，如果成功列表不为空，显示一键下载按钮
+            if (processedImages.length > 0) {
+                summaryText.innerText = `全部处理完毕！成功转换 ${processedImages.length} 张图片。`;
+                downloadZipBtn.style.display = 'inline-block';
+            }
+        });
+
+        // 按钮点击事件：打包并下载 ZIP
+        downloadZipBtn.addEventListener('click', async () => {
+            downloadZipBtn.disabled = true;
+            downloadZipBtn.innerText = '正在打包 ZIP...';
+
+            const zip = new JSZip();
+            
+            // 将所有处理好的图片塞进 zip 实例中
+            processedImages.forEach(img => {
+                zip.file(img.name, img.blob);
+            });
+
+            // 生成 zip 文件并触发浏览器下载
+            const content = await zip.generateAsync({ type: "blob" });
+            const zipUrl = URL.createObjectURL(content);
+            
+            const a = document.createElement('a');
+            a.href = zipUrl;
+            a.download = "converted_images.zip";
+            document.body.appendChild(a);
+            a.click();
+            
+            // 清理
+            document.body.removeChild(a);
+            URL.revokeObjectURL(zipUrl);
+            downloadZipBtn.disabled = false;
+            downloadZipBtn.innerText = '一键打包下载全部 PNG';
+        });
+    </script>
+</body>
+</html>
