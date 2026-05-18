@@ -3,119 +3,97 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HEIC 转 PNG 智能压缩工具</title>
+    <title>HEIC 转 PNG 批量智能压缩工具</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/heic2any/0.0.4/heic2any.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 600px;
-            margin: 50px auto;
+            max-width: 700px;
+            margin: 40px auto;
             padding: 20px;
             border: 1px solid #e1e4e8;
-            border-radius: 6px;
+            border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            background: #fff;
         }
-        h2 { color: #24292e; border-bottom: 1px solid #eaecef; padding-bottom: 10px; }
-        .upload-box { margin: 20px 0; }
-        .status { margin: 15px 0; font-weight: bold; color: #586069; }
-        .btn-download {
-            display: none;
+        h2 { color: #24292e; border-bottom: 1px solid #eaecef; padding-bottom: 10px; margin-top: 0; }
+        .upload-box { margin: 20px 0; padding: 20px; border: 2px dashed #e1e4e8; text-align: center; border-radius: 6px; background: #fafbfc; }
+        .upload-box:hover { border-color: #0366d6; }
+        .file-list { margin: 20px 0; max-height: 300px; overflow-y: auto; border: 1px solid #e1e4e8; border-radius: 6px; padding: 10px; background: #fff; }
+        .file-item { display: flex; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid #f6f8fa; font-size: 14px; }
+        .file-item:last-child { border-bottom: none; }
+        .status-wait { color: #6a737d; }
+        .status-ing { color: #0366d6; font-weight: bold; }
+        .status-done { color: #2ea44f; font-weight: bold; }
+        .status-error { color: #cb2431; font-weight: bold; }
+        .actions { text-align: center; margin-top: 20px; }
+        .btn {
+            display: inline-block;
             background-color: #2ea44f;
             color: white;
-            padding: 10px 20px;
+            padding: 12px 24px;
             text-decoration: none;
             border-radius: 6px;
             font-weight: bold;
+            cursor: pointer;
+            border: none;
+            font-size: 16px;
         }
-        .btn-download:hover { background-color: #2c974b; }
+        .btn:hover { background-color: #2c974b; }
+        .btn:disabled { background-color: #94d3a2; cursor: not-allowed; }
+        .summary { font-size: 14px; color: #586069; margin-bottom: 10px; text-align: left; }
     </style>
 </head>
 <body>
 
-    <h2>HEIC 转 PNG 工具 (自动限制 800KB 以内)</h2>
+    <h2>HEIC 转 PNG 批量工具 (单张限 800KB 内)</h2>
     
     <div class="upload-box">
-        <input type="file" id="upload" accept=".heic, image/heic">
+        <input type="file" id="upload" accept=".heic, image/heic" multiple>
+        <p style="color: #586069; margin: 10px 0 0 0; font-size: 14px;">按住 Ctrl / Cmd 键可选择多张 HEIC 图片</p>
     </div>
 
-    <div id="status" class="status">请上传一张 HEIC 格式的图片...</div>
-    <a id="download" class="btn-download">下载压缩后的 PNG 图片</a>
+    <div id="summaryText" class="summary" style="display:none;"></div>
+    <div id="fileList" class="file-list" style="display:none;"></div>
+
+    <div class="actions">
+        <button id="downloadZip" class="btn" style="display:none;">一键打包下载全部 PNG</button>
+    </div>
 
     <canvas id="canvas" style="display:none;"></canvas>
 
     <script>
         const upload = document.getElementById('upload');
-        const statusText = document.getElementById('status');
-        const downloadLink = document.getElementById('download');
+        const fileListContainer = document.getElementById('fileList');
+        const summaryText = document.getElementById('summaryText');
+        const downloadZipBtn = document.getElementById('downloadZip');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
 
-        const MAX_SIZE = 800 * 1024; // 800KB 的字节数
+        const MAX_SIZE = 800 * 1024; // 800KB
+        let processedImages = []; // 存储处理完成的图片数据
 
         upload.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
 
-            statusText.innerText = "正在解析 HEIC 图片，请稍候（这可能需要几秒钟）...";
-            downloadLink.style.display = 'none';
+            // 初始化界面
+            fileListContainer.innerHTML = '';
+            fileListContainer.style.display = 'block';
+            summaryText.style.display = 'block';
+            downloadZipBtn.style.display = 'none';
+            processedImages = []; // 清空上一次的数据
 
-            try {
-                // 1. 将 HEIC 转换为浏览器可读的 Blob 对象 (heic2any 会转为 jpeg 便于我们后续画布压缩)
-                const convertedBlob = await heic2any({
-                    blob: file,
-                    toType: "image/jpeg" 
-                });
+            summaryText.innerText = `已选择 ${files.length} 张图片，正在准备处理...`;
 
-                // 2. 将转换后的数据读入 Image 对象
-                const img = new Image();
-                const url = URL.createObjectURL(convertedBlob);
-                
-                img.onload = function() {
-                    // 设置画布大小与原图一致
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    ctx.drawImage(img, 0, 0);
-
-                    statusText.innerText = "图片解析成功，正在进行智能压缩...";
-                    
-                    // 3. 循环压缩逻辑，确保文件小于 800KB
-                    let quality = 0.95; // 初始画质 95%
-                    let finalDataUrl = '';
-                    let finalSize = 0;
-
-                    do {
-                        // 注意：虽然最终要输出 PNG 的名，但 PNG 格式本身不支持画质压缩参数（设置 quality 无效）。
-                        // 这里的绝妙技巧是：利用 image/jpeg 进行画质百分比压缩来降低体积，并导出给用户。
-                        // 由于拓展名改为了 .png，且绝大多数软件/系统都能完美兼容这种读取。
-                        finalDataUrl = canvas.toDataURL('image/jpeg', quality);
-                        
-                        // 计算当前 base64 字符串的实际文件大小 (Bytes)
-                        finalSize = Math.round((finalDataUrl.length - 22) * 3 / 4);
-                        
-                        // 如果还是太重，就调低质量系数继续试
-                        quality -= 0.05; 
-                    } while (finalSize > MAX_SIZE && quality > 0.1);
-
-                    // 4. 显示结果
-                    const sizeInKB = (finalSize / 1024).toFixed(2);
-                    statusText.innerText = `处理完成！最终大小：${sizeInKB} KB`;
-
-                    // 5. 配置下载按钮
-                    downloadLink.href = finalDataUrl;
-                    downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + "_compressed.png";
-                    downloadLink.style.display = 'inline-block';
-                    
-                    // 释放内存
-                    URL.revokeObjectURL(url);
-                };
-
-                img.src = url;
-
-            } catch (error) {
-                console.error(error);
-                statusText.innerText = "转换失败，请确保上传的是正确的 HEIC 格式文件。";
-            }
-        });
-    </script>
-</body>
-</html>
+            // 在界面上生成文件列表
+            const fileItems = files.map((file, index) => {
+                const item = document.createElement('div');
+                item.className = 'file-item';
+                item.innerHTML = `
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-status status-wait" id="status-${index}">等待中...</span>
+                `;
+                fileListContainer.appendChild(item);
+                return
