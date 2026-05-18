@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HEIC 转 PNG 批量智能压缩工具</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/heic2any/0.0.4/heic2any.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 700px;
+            margin: 40px auto;
+            padding: 20px;
+            border: 1px solid #e1e4e8;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            background: #fff;
+        }
+        h2 { color: #24292e; border-bottom: 1px solid #eaecef; padding-bottom: 10px; margin-top: 0; }
+        .upload-box { margin: 20px 0; padding: 20px; border: 2px dashed #e1e4e8; text-align: center; border-radius: 6px; background: #fafbfc; }
+        .upload-box:hover { border-color: #0366d6; }
+        .file-list { margin: 20px 0; max-height: 300px; overflow-y: auto; border: 1px solid #e1e4e8; border-radius: 6px; padding: 10px; background: #fff; }
+        .file-item { display: flex; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid #f6f8fa; font-size: 14px; }
+        .file-item:last-child { border-bottom: none; }
+        .status-wait { color: #6a737d; }
+        .status-ing { color: #0366d6; font-weight: bold; }
+        .status-done { color: #2ea44f; font-weight: bold; }
+        .status-error { color: #cb2431; font-weight: bold; }
+        .actions { text-align: center; margin-top: 20px; }
+        .btn {
+            display: inline-block;
+            background-color: #2ea44f;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            font-size: 16px;
+        }
+        .btn:hover { background-color: #2c974b; }
+        .btn:disabled { background-color: #94d3a2; cursor: not-allowed; }
+        .summary { font-size: 14px; color: #586069; margin-bottom: 10px; text-align: left; }
+    </style>
+</head>
+<body>
+
+    <h2>HEIC 转 PNG 批量工具 (单张限 800KB 内)</h2>
+    
+    <div class="upload-box">
+        <input type="file" id="upload" accept=".heic, image/heic" multiple>
+        <p style="color: #586069; margin: 10px 0 0 0; font-size: 14px;">按住 Ctrl / Cmd 键可选择多张 HEIC 图片</p>
+    </div>
+
+    <div id="summaryText" class="summary" style="display:none;"></div>
+    <div id="fileList" class="file-list" style="display:none;"></div>
+
+    <div class="actions">
+        <button id="downloadZip" class="btn" style="display:none;">一键打包下载全部 PNG</button>
+    </div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <script>
+        const upload = document.getElementById('upload');
+        const fileListContainer = document.getElementById('fileList');
+        const summaryText = document.getElementById('summaryText');
+        const downloadZipBtn = document.getElementById('downloadZip');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        const MAX_SIZE = 800 * 1024; // 800KB
+        let processedImages = []; // 存储处理完成的图片数据
+
+        upload.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+
+            // 初始化界面
+            fileListContainer.innerHTML = '';
+            fileListContainer.style.display = 'block';
+            summaryText.style.display = 'block';
+            downloadZipBtn.style.display = 'none';
+            processedImages = []; // 清空上一次的数据
+
+            summaryText.innerText = `已选择 ${files.length} 张图片，正在准备处理...`;
+
+            // 在界面上生成文件列表
+            const fileItems = files.map((file, index) => {
+                const item = document.createElement('div');
+                item.className = 'file-item';
+                item.innerHTML = `
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-status status-wait" id="status-${index}">等待中...</span>
+                `;
+                fileListContainer.appendChild(item);
+                return { file, statusEl: item.querySelector(`#status-${index}`) };
+            });
+
+            // 一个接一个地处理图片（防止多张图同时转码导致浏览器卡死）
+            for (let i = 0; i < fileItems.length; i++) {
+                const { file, statusEl } = fileItems[i];
+                statusEl.innerText = '正在解析 HEIC...';
+                statusEl.className = 'file-status status-ing';
+
+                try {
+                    // 1. HEIC 转成 Blob
+                    const convertedBlob = await heic2any({
+                        blob: file,
+                        toType: "image/jpeg"
+                    });
+
+                    // 2. 载入图片对象获取宽高
+                    const img = new Image();
+                    const url = URL.createObjectURL(convertedBlob);
+                    
+                    await new Promise((resolve) => {
+                        img.onload = () => {
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            ctx.drawImage(img, 0, 0);
+                            URL.revokeObjectURL(url);
+                            resolve();
+                        };
+                        img.src = url;
+                    });
+
+                    // 3. 动态画质压缩循环，死守 800KB 限制
+                    statusEl.innerText = '正在智能压缩...';
+                    let quality = 0.95;
+                    let finalBlob = null;
+
+                    do {
+                        // 这次我们直接导出 Blob 方便后续打 zip 包
+                        finalBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
+                        quality -= 0.05;
+                    } while (finalBlob.size > MAX_SIZE && quality > 0.1);
+
+                    // 4. 处理完成，保存数据
+                    const newName = file.name.replace(/\.[^/.]+$/, "") + "_compressed.png";
+                    processedImages.push({ name: newName, blob: finalBlob });
+
+                    const finalSizeKB = (finalBlob.size / 1024).toFixed(1);
+                    statusEl.innerText = `完成 (${finalSizeKB} KB)`;
+                    statusEl.className = 'file-status status-done';
+
+                } catch (error) {
+                    console.error(error);
+                    statusEl.innerText = '转换失败';
+                    statusEl.className = 'file-status status-error';
+                }
+
+                summaryText.innerText = `进度：已处理 ${i + 1} / ${files.length} 张图片`;
+            }
+
+            // 全部处理完成后，如果成功列表不为空，显示一键下载按钮
+            if (processedImages.length > 0) {
+                summaryText.innerText = `全部处理完毕！成功转换 ${processedImages.length} 张图片。`;
+                downloadZipBtn.style.display = 'inline-block';
+            }
+        });
+
+        // 按钮点击事件：打包并下载 ZIP
+        downloadZipBtn.addEventListener('click', async () => {
+            downloadZipBtn.disabled = true;
+            downloadZipBtn.innerText = '正在打包 ZIP...';
+
+            const zip = new JSZip();
+            
+            // 将所有处理好的图片塞进 zip 实例中
+            processedImages.forEach(img => {
+                zip.file(img.name, img.blob);
+            });
+
+            // 生成 zip 文件并触发浏览器下载
+            const content = await zip.generateAsync({ type: "blob" });
+            const zipUrl = URL.createObjectURL(content);
+            
+            const a = document.createElement('a');
+            a.href = zipUrl;
+            a.download = "converted_images.zip";
+            document.body.appendChild(a);
+            a.click();
+            
+            // 清理
+            document.body.removeChild(a);
+            URL.revokeObjectURL(zipUrl);
+            downloadZipBtn.disabled = false;
+            downloadZipBtn.innerText = '一键打包下载全部 PNG';
+        });
+    </script>
+</body>
+</html>
